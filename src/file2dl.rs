@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::atomic::AtomicUsize,
+    sync::atomic::{AtomicBool, AtomicUsize},
     time::Duration,
 };
 
@@ -14,17 +14,17 @@ use crate::{
 };
 use futures::StreamExt;
 use reqwest::{header::RANGE, Client, ClientBuilder, Error, Response};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering::Relaxed;
-use tokio::sync::watch::{self, channel, Sender};
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct File2Dl {
     pub url: Url,
     pub name_on_disk: String,
     pub dl_dir: String,
     pub size_on_disk: AtomicUsize,
-    running: Sender<bool>,
-    pub complete: bool,
+    running: AtomicBool,
+    pub complete: AtomicBool,
 }
 
 impl File2Dl {
@@ -34,8 +34,8 @@ impl File2Dl {
             create_dir(download_path)?;
         }
         let name_on_disk = generate_name_on_disk(&url.filename, download_path)?;
-        let (running, _) = watch::channel(false);
-        let complete = false;
+        let running = AtomicBool::new(false);
+        let complete = AtomicBool::new(false);
         let dl_dir = download_path.to_string();
         Ok(Self {
             url,
@@ -46,13 +46,11 @@ impl File2Dl {
             complete,
         })
     }
-    pub fn switch_status(&self) -> Result<(), File2DlError> {
-        let rx = self.running.subscribe();
-        let status = *rx.borrow();
-        self.running.send(!status)?;
-        Ok(())
+    pub fn switch_status(&self) {
+        let status = self.running.load(Relaxed);
+        self.running.store(!status, Relaxed);
     }
-    pub async fn single_thread_dl(&mut self) -> Result<(), File2DlError> {
+    pub async fn single_thread_dl(&self) -> Result<(), File2DlError> {
         let client = ClientBuilder::new()
             .timeout(Duration::from_secs(7))
             .build()?;
@@ -67,15 +65,18 @@ impl File2Dl {
             .create(true)
             .truncate(false)
             .open(full_path)?;
-        let mut rx = self.running.subscribe();
         while let Some(packed_chunk) = stream.next().await {
-            rx.wait_for(|running| *running).await?;
             let chunk = packed_chunk?;
+            loop {
+                if self.running.load(Relaxed) {
+                    break;
+                }
+            }
             file.write_all(&chunk)?;
             self.size_on_disk
                 .fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed);
         }
-        self.complete = true;
+        self.complete.store(true, Relaxed);
         Ok(())
     }
     pub fn from(dir: &str) -> Result<Vec<File2Dl>, std::io::Error> {
@@ -100,7 +101,6 @@ impl File2Dl {
                         content_length: m_data.content_length,
                         range_support: m_data.range_support,
                     };
-                    let (tx, _) = channel(false);
                     let name_on_disk = {
                         if m_data.range_support {
                             m_data.name_on_disk
@@ -108,13 +108,14 @@ impl File2Dl {
                             generate_name_on_disk(&m_data.name_on_disk, dir)?
                         }
                     };
+                    let is_complete = size_on_disk == m_data.content_length;
                     File2Dl {
                         url,
                         dl_dir: dir.to_string(),
                         name_on_disk,
                         size_on_disk: AtomicUsize::new(size_on_disk),
-                        running: tx,
-                        complete: size_on_disk == m_data.content_length,
+                        running: AtomicBool::new(false),
+                        complete: AtomicBool::new(is_complete),
                     }
                 };
                 Ok(f2dl)
@@ -125,24 +126,20 @@ impl File2Dl {
 
 fn generate_name_on_disk(init: &str, download_path: &str) -> Result<String, std::io::Error> {
     let path = std::path::Path::new(download_path);
-    let mut cpy = init.to_string();
+    let (name, ext) = {
+        let file = Path::new(init);
+        (
+            file.file_stem().unwrap_or_default().to_string_lossy(),
+            file.extension().unwrap_or_default().to_string_lossy(),
+        )
+    };
+    let mut init = init.to_string();
     let mut idx = 1;
-    let splits = init.rsplit('.').collect::<Vec<_>>();
-
-    while path.join(cpy.clone()).exists() {
-        cpy.clear();
-        for i in (1..splits.len()).rev() {
-            cpy.push_str(splits[i]);
-            if i != 1 {
-                cpy.push('.');
-            }
-        }
-        let slice = format!("_{}.{}", idx, splits[0]);
-        cpy.push_str(&slice);
+    while path.join(&init).exists() {
+        init = format!("{name}_{idx}.{ext}");
         idx += 1;
     }
-
-    Ok(cpy)
+    Ok(init)
 }
 async fn init_res(f: &File2Dl, client: &Client) -> Result<Response, Error> {
     if f.url.range_support {

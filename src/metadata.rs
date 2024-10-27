@@ -1,4 +1,4 @@
-use std::{fs::OpenOptions, io::Write, path::Path};
+use std::{fs::File, path::Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,14 +14,10 @@ pub struct MetaData {
 }
 
 pub fn init_metadata(f: &File2Dl, dl_path: &str) -> Result<(), std::io::Error> {
-    let meta_filename = format!("{}.metadl", &f.name_on_disk);
+    let meta_filename = format!(".{}.metadl", &f.name_on_disk);
     let path = Path::new(dl_path).join(meta_filename);
     if !path.exists() {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)?;
+        let file = File::create(&path)?;
         let meta_data = MetaData {
             link: f.url.link.clone(),
             name_on_disk: f.name_on_disk.clone(),
@@ -29,8 +25,7 @@ pub fn init_metadata(f: &File2Dl, dl_path: &str) -> Result<(), std::io::Error> {
             content_length: f.url.content_length,
             range_support: f.url.range_support,
         };
-        let stringified = serde_json::to_string(&meta_data)?;
-        file.write_all(stringified.as_bytes())?;
+        serde_json::to_writer(file, &meta_data)?;
     }
 
     Ok(())

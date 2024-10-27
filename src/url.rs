@@ -7,11 +7,12 @@ use reqwest::{
     header::{HeaderMap, ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_LENGTH, RANGE},
     Client, ClientBuilder,
 };
+use serde::{Deserialize, Serialize};
 
 const URL_RE: &str = r#"(https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z0-9]{2,}(\.[a-zA-Z0-9]{2,})(\.[a-zA-Z0-9]{2,})?"#;
 const FILENAME_RE: &str = r#"^[\w,\s-]+\.[A-Za-z]{3}$"#;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Url {
     pub link: String,
     pub filename: String,
